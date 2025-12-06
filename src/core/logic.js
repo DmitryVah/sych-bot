@@ -115,6 +115,12 @@ async function processMessage(bot, msg) {
     
     let text = msg.text || msg.caption || "";
 
+    const cleanText = text.toLowerCase();
+    const replyUserId = msg.reply_to_message?.from?.id;
+    const isReplyToBot = replyUserId && String(replyUserId) === String(config.botId);
+    const hasTriggerWord = config.triggerRegex.test(cleanText); 
+    const isDirectlyCalled = hasTriggerWord || isReplyToBot; 
+
     // === ЕДИНЫЙ КОНТРОЛЛЕР СТАТУСА "ПЕЧАТАЕТ" ===
     let typingTimer = null;
     let safetyTimeout = null; // Предохранитель
@@ -354,19 +360,6 @@ async function processMessage(bot, msg) {
     });
     return;
   }
-
-    // [FIX] Сначала определяем, обращаются ли к нам, а потом проверяем Mute.
-    const cleanText = text.toLowerCase();
-
-    // 1. Усиленная проверка реплая (приводим к String оба ID для надежности)
-    const replyUserId = msg.reply_to_message?.from?.id;
-    const isReplyToBot = replyUserId && String(replyUserId) === String(config.botId);
-  
-    // 2. Проверка триггер-слова
-    const hasTriggerWord = config.triggerRegex.test(cleanText); 
-    
-    // 3. Итоговое решение: зовут ли нас?
-    const isDirectlyCalled = hasTriggerWord || isReplyToBot; 
 
   // === СТРОГАЯ ПРОВЕРКА МУТА ===
   // Если топик в муте, мы игнорируем ЛЮБОЙ текст (триггеры, реплаи, имя),
