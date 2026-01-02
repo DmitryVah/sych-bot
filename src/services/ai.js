@@ -228,7 +228,7 @@ class AiService {
   async getResponse(history, currentMessage, imageBuffer = null, mimeType = "image/jpeg", userInstruction = "", userProfile = null, isSpontaneous = false) {
     console.log(`[DEBUG AI] getResponse вызван. Текст: ${currentMessage.text.slice(0, 20)}...`);
 
-    // 1. Подготовка данных (общая для обоих методов)
+    // 1. Подготовка данных
     const relevantHistory = history.slice(-20); 
     const contextStr = relevantHistory.map(m => `${m.role}: ${m.text}`).join('\n');
     let personalInfo = "";
@@ -255,7 +255,11 @@ class AiService {
         senderName: currentMessage.sender
     });
 
-    // 2. ПОПЫТКА OPENROUTER (CREATIVE MODEL)
+    // === ОПРЕДЕЛЯЕМ НУЖЕН ЛИ ПОИСК ===
+    const searchTriggers = /(курс|погода|новости|цена|стоимость|сколько стоит|найди|погугли|информация о|события|счет матча|кто такой|что такое|где купить|дата выхода)/i;
+    const needsSearch = searchTriggers.test(currentMessage.text);
+
+    // 2. ПОПЫТКА OPENROUTER
     if (this.openai) {
         try {
             // console.log(`[AI] OpenRouter Creative: ${config.openRouterModel}`);
@@ -269,16 +273,28 @@ class AiService {
                 });
             }
 
-            const completion = await this.openai.chat.completions.create({
-              model: config.openRouterModel,
-              messages: messages,
-              max_tokens: 2500,
-              temperature: 0.9,
-          });
+            // Формируем параметры запроса
+            const requestOptions = {
+                model: config.openRouterModel,
+                messages: messages,
+                max_tokens: 2500,
+                temperature: 0.9,
+            };
 
+            // !!! ВАЖНО: ВКЛЮЧАЕМ ПЛАГИН ЧЕРЕЗ extraBody !!!
+            if (needsSearch) {
+                console.log("[OPENROUTER] Включаю Web Search Plugin...");
+                requestOptions.extraBody = {
+                    plugins: [ { id: "web" } ]
+                };
+            }
+
+            const completion = await this.openai.chat.completions.create(requestOptions);
+            
             this.countRequest('openrouter-creative'); 
+            
             let text = completion.choices[0].message.content;
-            return text.replace(/^thought[\s\S]*?\n\n/i, ''); // Чистка мыслей
+            return text.replace(/^thought[\s\S]*?\n\n/i, ''); 
         } catch (e) {
             console.error(`[OPENROUTER FAIL] Creative Error: ${e.message}. Fallback to Google...`);
         }
@@ -300,7 +316,6 @@ class AiService {
         });
         
         let text = result.response.text();
-        // (Тут старая логика очистки, оставляем как было в оригинале)
         if (result.response.candidates && result.response.candidates[0].content && result.response.candidates[0].content.parts) {
             const parts = result.response.candidates[0].content.parts;
             if (parts.length > 0) text = parts[parts.length - 1].text;
@@ -308,7 +323,6 @@ class AiService {
         
         text = text.replace(/^toolcode[\s\S]*?print\(.*?\)\s*/i, '').replace(/^thought[\s\S]*?\n\n/i, '').replace(/```json/g, '').replace(/```/g, '').trim();
         
-        // Grounding Metadata handling...
         if (result.response.candidates[0].groundingMetadata?.groundingChunks) {
             const links = result.response.candidates[0].groundingMetadata.groundingChunks
                 .filter(c => c.web?.uri).map(c => `[${c.web.title || "Источник"}](${c.web.uri})`);
