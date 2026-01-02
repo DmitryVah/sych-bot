@@ -19,9 +19,13 @@ class AiService {
     this.keyIndex = 0; 
     this.keys = config.geminiKeys;
     this.usingFallback = false; 
-    this.bot = null; // Ссылка на бота для уведомлений
+    this.bot = null; 
 
     // === СТАТИСТИКА ===
+    // Добавили OpenRouter
+    this.openRouterStats = { creative: 0, logic: 0 };
+    
+    // Старые ключи Gemini
     this.stats = this.keys.map(() => ({ 
       flash: 0, flashStatus: true,
       lite: 0, liteStatus: true,
@@ -44,34 +48,44 @@ class AiService {
     }
   }
 
-  // Метод для подсчета (вставь его сразу после конструктора или перед initModel)
+  // Метод для подсчета
   countRequest(type) {
     const today = new Date().getDate();
     
     // === СБРОС В ПОЛНОЧЬ ===
     if (today !== this.lastResetDate) {
-        // Оживляем все статусы
+        // Сброс Gemini
         this.stats = this.keys.map(() => ({ 
             flash: 0, flashStatus: true,
             lite: 0, liteStatus: true,
             gemma: 0, gemmaStatus: true 
         })); 
+        
+        // Сброс OpenRouter
+        this.openRouterStats = { creative: 0, logic: 0 };
+
         this.lastResetDate = today;
         
-        // Если сидели на Lite — возвращаемся на Flash
         if (this.usingFallback) {
             this.usingFallback = false;
             this.keyIndex = 0;
             this.initModel(); 
             this.notifyAdmin("🌙 **Новый день!**\nЛимиты сброшены.\nРежим переключен на: ⚡ **FLASH**");
         } else {
-             this.keyIndex = 0;
-             this.initModel();
+            this.keyIndex = 0;
+            this.initModel();
         }
     }
     // =======================
 
-    if (this.stats[this.keyIndex]) {
+    // Логика подсчета
+    if (type === 'openrouter-creative') {
+        this.openRouterStats.creative++;
+    } 
+    else if (type === 'openrouter-logic') {
+        this.openRouterStats.logic++;
+    }
+    else if (this.stats[this.keyIndex]) {
         if (type === 'gemma') {
             this.stats[this.keyIndex].gemma++;
         } 
@@ -87,17 +101,20 @@ class AiService {
 
   // Метод для вывода отчета
   getStatsReport() {
-    const mode = this.usingFallback ? "⚠️ LITE РЕЖИМ" : "⚡ FLASH РЕЖИМ";
+    const mode = this.usingFallback ? "⚠️ FALLBACK (LITE)" : "⚡ NORMAL";
     
-    const rows = this.stats.map((s, i) => {
+    // Блок OpenRouter
+    const orText = `🌐 **OpenRouter:**\n   Creative: ${this.openRouterStats.creative}\n   Logic: ${this.openRouterStats.logic}`;
+
+    // Блок Gemini
+    const geminiRows = this.stats.map((s, i) => {
         const fIcon = s.flashStatus ? "🟢" : "🔴";
         const lIcon = s.liteStatus ? "🟢" : "🔴";
         const gIcon = s.gemmaStatus ? "🟢" : "🔴";
-        // Формат: 1 —🟢 0 • 🟢0 • 🔴121
-        return `${i + 1} — ${fIcon}${s.flash} • ${lIcon}${s.lite} • ${gIcon}${s.gemma}`;
+        return `   🔑${i + 1}: ${fIcon}${s.flash} • ${lIcon}${s.lite} • ${gIcon}${s.gemma}`;
     }).join('\n');
 
-    return `Текущий режим: ${mode}\n\n(Flash • Lite • Gemma)\n${rows}`;
+    return `Режим Gemini: ${mode}\n\n${orText}\n\n💎 **Google Keys:**\n   (Flash • Lite • Gemma)\n${geminiRows}`;
   }
 
   initModel() {
@@ -253,12 +270,13 @@ class AiService {
             }
 
             const completion = await this.openai.chat.completions.create({
-                model: config.openRouterModel,
-                messages: messages,
-                max_tokens: 2500,
-                temperature: 0.9,
-            });
-            
+              model: config.openRouterModel,
+              messages: messages,
+              max_tokens: 2500,
+              temperature: 0.9,
+          });
+
+            this.countRequest('openrouter-creative'); 
             let text = completion.choices[0].message.content;
             return text.replace(/^thought[\s\S]*?\n\n/i, ''); // Чистка мыслей
         } catch (e) {
@@ -314,6 +332,7 @@ async determineReaction(contextText) {
               model: config.openRouterLogicModel,
               messages: [{ role: "user", content: prompts.reaction(contextText, allowed.join(" ")) }]
           });
+          this.countRequest('openrouter-logic');
           const text = completion.choices[0].message.content.trim();
           const match = text.match(/(\p{Emoji_Presentation}|\p{Extended_Pictographic})/u);
           if (match && allowed.includes(match[0])) return match[0];
@@ -343,6 +362,7 @@ async determineReaction(contextText) {
                 messages: [{ role: "user", content: prompts.analyzeImmediate(currentProfile, lastMessages) }],
                 response_format: { type: "json_object" } // OpenRouter поддерживает JSON режим
             });
+            this.countRequest('openrouter-logic');
             return JSON.parse(completion.choices[0].message.content);
         } catch (e) { console.error(`[OR LOGIC FAIL] Analyze: ${e.message}`); }
     }
@@ -403,6 +423,7 @@ async determineReaction(contextText) {
                 model: config.openRouterLogicModel,
                 messages: [{ role: "user", content: prompts.shouldAnswer(lastMessages) }]
             });
+            this.countRequest('openrouter-logic');
             return completion.choices[0].message.content.toUpperCase().includes('YES');
         } catch (e) {}
     }
