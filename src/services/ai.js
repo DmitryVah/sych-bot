@@ -2,9 +2,20 @@ const { GoogleGenerativeAI, HarmCategory, HarmBlockThreshold } = require("@googl
 const config = require('../config');
 const prompts = require('../core/prompts');
 const axios = require('axios');
+const OpenAI = require('openai');
 
 class AiService {
   constructor() {
+    // Инициализация OpenRouter
+    this.openai = config.openRouterKey ? new OpenAI({
+        baseURL: "https://openrouter.ai/api/v1",
+        apiKey: config.openRouterKey,
+        defaultHeaders: {
+          "HTTP-Referer": "https://github.com/Veta-one/sych-bot",
+          "X-Title": "Sych Bot"
+        }
+    }) : null;
+
     this.keyIndex = 0; 
     this.keys = config.geminiKeys;
     this.usingFallback = false; 
@@ -199,104 +210,92 @@ class AiService {
   // === ОСНОВНОЙ ОТВЕТ ===
   async getResponse(history, currentMessage, imageBuffer = null, mimeType = "image/jpeg", userInstruction = "", userProfile = null, isSpontaneous = false) {
     console.log(`[DEBUG AI] getResponse вызван. Текст: ${currentMessage.text.slice(0, 20)}...`);
+
+    // 1. Подготовка данных (общая для обоих методов)
+    const relevantHistory = history.slice(-20); 
+    const contextStr = relevantHistory.map(m => `${m.role}: ${m.text}`).join('\n');
+    let personalInfo = "";
+    let replyContext = "";
+
+    if (currentMessage.replyText) replyContext = `!!! ПОЛЬЗОВАТЕЛЬ ОТВЕТИЛ НА СООБЩЕНИЕ:\n"${currentMessage.replyText}"`;
+    if (userInstruction) personalInfo += `\n!!! СПЕЦ-ИНСТРУКЦИЯ !!!\n${userInstruction}\n`;
+    if (userProfile) {
+        const score = userProfile.relationship || 50;
+        let relationText = "";
+        if (score <= 20) relationText = `СТАТУС: ВРАГ (${score}/100). Отвечай грубо, с сарказмом.`;
+        else if (score <= 40) relationText = `СТАТУС: ХОЛОД (${score}/100). Язви, не доверяй.`;
+        else if (score >= 80) relationText = `СТАТУС: БРАТАН (${score}/100). Поддерживай, шути по-доброму.`;
+        personalInfo += `\n--- ДОСЬЕ ---\nФакты: ${userProfile.facts || "Нет"}\n${relationText}\n-----------------\n`;
+    }
+
+    const fullPromptText = prompts.mainChat({
+        time: this.getCurrentTime(),
+        isSpontaneous: isSpontaneous,
+        userMessage: currentMessage.text,
+        replyContext: replyContext,
+        history: contextStr,
+        personalInfo: personalInfo,
+        senderName: currentMessage.sender
+    });
+
+    // 2. ПОПЫТКА OPENROUTER (CREATIVE MODEL)
+    if (this.openai) {
+        try {
+            // console.log(`[AI] OpenRouter Creative: ${config.openRouterModel}`);
+            const messages = [{ role: "system", content: prompts.system() }, { role: "user", content: [] }];
+            
+            messages[1].content.push({ type: "text", text: fullPromptText });
+            if (imageBuffer) {
+                messages[1].content.push({
+                    type: "image_url",
+                    image_url: { url: `data:${mimeType};base64,${imageBuffer.toString('base64')}` }
+                });
+            }
+
+            const completion = await this.openai.chat.completions.create({
+                model: config.openRouterModel,
+                messages: messages,
+                max_tokens: 2500,
+                temperature: 0.9,
+            });
+            
+            let text = completion.choices[0].message.content;
+            return text.replace(/^thought[\s\S]*?\n\n/i, ''); // Чистка мыслей
+        } catch (e) {
+            console.error(`[OPENROUTER FAIL] Creative Error: ${e.message}. Fallback to Google...`);
+        }
+    }
+
+    // 3. FALLBACK: ORIGINAL GEMINI LOGIC
     const requestLogic = async () => {
         this.countRequest('gemini');
         let promptParts = [];
-        
         if (imageBuffer) {
           promptParts.push({ inlineData: { mimeType: mimeType, data: imageBuffer.toString("base64") } });
           promptParts.push({ text: "Проанализируй этот файл. Опиши, что там, или ответь на вопрос по нему." });
         }
-
-        const relevantHistory = history.slice(-20); 
-        const contextStr = relevantHistory.map(m => `${m.role}: ${m.text}`).join('\n');
-        
-        let personalInfo = "";
-        let replyContext = "";
-
-        if (currentMessage.replyText) {
-            replyContext = `!!! ПОЛЬЗОВАТЕЛЬ ОТВЕТИЛ НА СООБЩЕНИЕ:\n"${currentMessage.replyText}"`;
-        }
-
-        if (userInstruction) personalInfo += `\n!!! СПЕЦ-ИНСТРУКЦИЯ !!!\n${userInstruction}\n`;
-
-        if (userProfile) {
-            const score = userProfile.relationship || 50;
-            let relationText = "";
-            if (score <= 20) relationText = `СТАТУС: ВРАГ (${score}/100). Отвечай грубо, с сарказмом.`;
-            else if (score <= 40) relationText = `СТАТУС: ХОЛОД (${score}/100). Язви, не доверяй.`;
-            else if (score >= 80) relationText = `СТАТУС: БРАТАН (${score}/100). Поддерживай, шути по-доброму.`;
-            
-            personalInfo += `\n--- ДОСЬЕ ---\nФакты: ${userProfile.facts || "Нет"}\n${relationText}\n-----------------\n`;
-        }
-
-        const fullPromptText = 
-            prompts.mainChat({
-                time: this.getCurrentTime(),
-                isSpontaneous: isSpontaneous,
-                userMessage: currentMessage.text,
-                replyContext: replyContext,
-                history: contextStr,
-                personalInfo: personalInfo,
-                senderName: currentMessage.sender
-            });
-
         promptParts.push({ text: fullPromptText });
 
-        console.log(`[DEBUG AI] Отправляю запрос...`);
-        
-        // !!! ВОТ ТУТ ГЛАВНОЕ ИЗМЕНЕНИЕ !!!
-        // Переопределяем конфиг ТОЛЬКО для этого запроса.
-        // maxOutputTokens: 1000 — это примерно 1 длинное сообщение в Telegram.
-        // Это не даст ему генерировать бесконечные статьи.
         const result = await this.creativeModel.generateContent({
             contents: [{ role: 'user', parts: promptParts }],
-            generationConfig: {
-                maxOutputTokens: 2500, 
-                temperature: 0.9
-            }
+            generationConfig: { maxOutputTokens: 2500, temperature: 0.9 }
         });
         
-        const response = result.response;
-        const candidate = response.candidates[0];
-        let text = "";
-
-        // === ЛЕЧИМ ЗАДВАИВАНИЕ (Проблема Grounding) ===
-        // Если есть части (parts) и их несколько, берем только ПОСЛЕДНЮЮ текстовую часть.
-        // Это отсекает "черновики", которые модель пишет перед тем, как погуглить.
-        if (candidate.content && candidate.content.parts && candidate.content.parts.length > 0) {
-            const textParts = candidate.content.parts.filter(p => p.text && p.text.trim() !== "");
-            if (textParts.length > 0) {
-                // Берем самый последний кусок текста (это и есть финальный ответ)
-                text = textParts[textParts.length - 1].text;
-            } else {
-                text = response.text(); // Если вдруг частей нет, берем стандартно
-            }
-        } else {
-            text = response.text();
+        let text = result.response.text();
+        // (Тут старая логика очистки, оставляем как было в оригинале)
+        if (result.response.candidates && result.response.candidates[0].content && result.response.candidates[0].content.parts) {
+            const parts = result.response.candidates[0].content.parts;
+            if (parts.length > 0) text = parts[parts.length - 1].text;
         }
-
-        // Чистка мусора
-        text = text.replace(/^toolcode[\s\S]*?print\(.*?\)\s*/i, ''); 
-        text = text.replace(/^thought[\s\S]*?\n\n/i, ''); 
-        text = text.replace(/```json/g, '').replace(/```/g, '').trim(); 
-        // ==============================
-
-        // --- ИСТОЧНИКИ ---
-        if (response.candidates && response.candidates[0].groundingMetadata) {
-            const metadata = response.candidates[0].groundingMetadata;
-            if (metadata.groundingChunks) {
-                const links = [];
-                metadata.groundingChunks.forEach(chunk => {
-                    if (chunk.web && chunk.web.uri) {
-                        let siteName = "Источник";
-                        try { siteName = chunk.web.title || "Источник"; } catch (e) {}
-                        links.push(`[${siteName}](${chunk.web.uri})`);
-                    }
-                });
-                const uniqueLinks = [...new Set(links)].slice(0, 3);
-                if (uniqueLinks.length > 0) text += "\n\nНашел тут: " + uniqueLinks.join(" • ");
-            }
+        
+        text = text.replace(/^toolcode[\s\S]*?print\(.*?\)\s*/i, '').replace(/^thought[\s\S]*?\n\n/i, '').replace(/```json/g, '').replace(/```/g, '').trim();
+        
+        // Grounding Metadata handling...
+        if (result.response.candidates[0].groundingMetadata?.groundingChunks) {
+            const links = result.response.candidates[0].groundingMetadata.groundingChunks
+                .filter(c => c.web?.uri).map(c => `[${c.web.title || "Источник"}](${c.web.uri})`);
+            const unique = [...new Set(links)].slice(0, 3);
+            if (unique.length > 0) text += "\n\nНашел тут: " + unique.join(" • ");
         }
         return text;
     };
@@ -304,50 +303,60 @@ class AiService {
     try { return await this.executeWithRetry(requestLogic, 'gemini'); } catch (e) { throw e; }
   }
 
-  // === РЕАКЦИЯ ===
-  async determineReaction(contextText) {
-    const allowed = ["👍", "👎", "❤", "🔥", "🥰", "👏", "😁", "🤔", "🤯", "😱", "🤬", "😢", "🎉", "🤩", "🤮", "💩", "🙏", "👌", "🕊", "🤡", "🥱", "🥴", "😍", "🐳", "❤‍🔥", "🌚", "🌭", "💯", "🤣", "⚡", "🍌", "🏆", "💔", "🤨", "😐", "🍓", "🍾", "💋", "🖕", "😈", "😴", "😭", "🤓", "👻", "👨‍💻", "👀", "🎃", "🙈", "😇", "😨", "🤝", "✍", "🤗", "🫡", "🎅", "🎄", "☃", "💅", "🤪", "🗿", "🆒", "💘", "🙉", "🦄", "😘", "💊", "🙊", "😎", "👾", "🤷‍♂", "🤷", "🤷‍♀", "😡"];
-    const requestLogic = async () => {
-      this.countRequest('gemma'); // <-- ДОБАВИЛИ СЧЕТЧИК
-      const result = await this.logicModel.generateContent(prompts.reaction(contextText, allowed.join(" ")));
-      let text = result.response.text().trim();
-        const match = text.match(/(\p{Emoji_Presentation}|\p{Extended_Pictographic})/u);
-        if (match && allowed.includes(match[0])) return match[0];
-        return null;
-    };
-    // Передаем 'gemma' для ротации
-    try { return await this.executeWithRetry(requestLogic, 'gemma'); } catch (e) { return null; }
+// === РЕАКЦИЯ ===
+async determineReaction(contextText) {
+  const allowed = ["👍", "👎", "❤", "🔥", "🥰", "👏", "😁", "🤔", "🤯", "😱", "🤬", "😢", "🎉", "🤩", "🤮", "💩", "🙏", "👌", "🕊", "🤡", "🥱", "🥴", "😍", "🐳", "❤‍🔥", "🌚", "🌭", "💯", "🤣", "⚡", "🍌", "🏆", "💔", "🤨", "😐", "🍓", "🍾", "💋", "🖕", "😈", "😴", "😭", "🤓", "👻", "👨‍💻", "👀", "🎃", "🙈", "😇", "😨", "🤝", "✍", "🤗", "🫡", "🎅", "🎄", "☃", "💅", "🤪", "🗿", "🆒", "💘", "🙉", "🦄", "😘", "💊", "🙊", "😎", "👾", "🤷‍♂", "🤷", "🤷‍♀", "😡"];
+  
+  // 1. OpenRouter Logic
+  if (this.openai) {
+      try {
+          const completion = await this.openai.chat.completions.create({
+              model: config.openRouterLogicModel,
+              messages: [{ role: "user", content: prompts.reaction(contextText, allowed.join(" ")) }]
+          });
+          const text = completion.choices[0].message.content.trim();
+          const match = text.match(/(\p{Emoji_Presentation}|\p{Extended_Pictographic})/u);
+          if (match && allowed.includes(match[0])) return match[0];
+          return null;
+      } catch (e) {}
   }
 
-  // === БЫСТРЫЙ АНАЛИЗ (С НОРМАЛЬНОЙ ЧИСТКОЙ) ===
+  // 2. Google Fallback
+  const requestLogic = async () => {
+    this.countRequest('gemma'); 
+    const result = await this.logicModel.generateContent(prompts.reaction(contextText, allowed.join(" ")));
+    let text = result.response.text().trim();
+    const match = text.match(/(\p{Emoji_Presentation}|\p{Extended_Pictographic})/u);
+    if (match && allowed.includes(match[0])) return match[0];
+    return null;
+  };
+  try { return await this.executeWithRetry(requestLogic, 'gemma'); } catch (e) { return null; }
+}
+
+  // === БЫСТРЫЙ АНАЛИЗ ===
   async analyzeUserImmediate(lastMessages, currentProfile) {
+    // 1. OpenRouter Logic
+    if (this.openai) {
+        try {
+            const completion = await this.openai.chat.completions.create({
+                model: config.openRouterLogicModel, // Используем FREE модель
+                messages: [{ role: "user", content: prompts.analyzeImmediate(currentProfile, lastMessages) }],
+                response_format: { type: "json_object" } // OpenRouter поддерживает JSON режим
+            });
+            return JSON.parse(completion.choices[0].message.content);
+        } catch (e) { console.error(`[OR LOGIC FAIL] Analyze: ${e.message}`); }
+    }
+
+    // 2. Google Fallback
     const requestLogic = async () => {
       this.countRequest('gemma');
       const result = await this.logicModel.generateContent(prompts.analyzeImmediate(currentProfile, lastMessages));
-      let text = result.response.text();
-        
-        // 1. Чистим Markdown-обертку (```json ... ```)
-        text = text.replace(/```json/g, '').replace(/```/g, '').trim();
-
-        // 2. Ищем границы JSON (на всякий случай, если бот написал вступление)
-        const firstBrace = text.indexOf('{');
-        const lastBrace = text.lastIndexOf('}');
-        
-        if (firstBrace !== -1 && lastBrace !== -1) {
-            text = text.substring(firstBrace, lastBrace + 1);
-        }
-        
-        // 3. Пробуем парсить
-        return JSON.parse(text);
+      let text = result.response.text().replace(/```json/g, '').replace(/```/g, '').trim();
+      const first = text.indexOf('{'), last = text.lastIndexOf('}');
+      if (first !== -1 && last !== -1) text = text.substring(first, last + 1);
+      return JSON.parse(text);
     };
-
-    try { 
-        return await this.executeWithRetry(requestLogic, 'gemma'); 
-    } catch (e) { 
-        console.error(`[AI ANALYSIS ERROR]: ${e.message}`);
-        // Возвращаем null, чтобы бот не падал, а просто пропускал этот шаг
-        return null; 
-    }
+    try { return await this.executeWithRetry(requestLogic, 'gemma'); } catch (e) { return null; }
   }
 
   // === МАССОВЫЙ АНАЛИЗ ===
@@ -387,11 +396,23 @@ class AiService {
   }
   
   async shouldAnswer(lastMessages) {
+    // 1. OpenRouter Logic
+    if (this.openai) {
+        try {
+            const completion = await this.openai.chat.completions.create({
+                model: config.openRouterLogicModel,
+                messages: [{ role: "user", content: prompts.shouldAnswer(lastMessages) }]
+            });
+            return completion.choices[0].message.content.toUpperCase().includes('YES');
+        } catch (e) {}
+    }
+
+    // 2. Google Fallback
     const requestLogic = async () => {
       this.countRequest('gemma');
       const res = await this.logicModel.generateContent(prompts.shouldAnswer(lastMessages));
       return res.response.text().toUpperCase().includes('YES');
-  };
+    };
     try { return await this.executeWithRetry(requestLogic, 'gemma'); } catch(e) { return false; }
   }
 

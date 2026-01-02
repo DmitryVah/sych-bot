@@ -1,0 +1,31 @@
+name: Deploy Sych Bot
+
+on:
+  push:
+    branches:
+      - main
+      - master  # На всякий случай, если ветка называется master
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1.0.0
+        with:
+          host: ${{ secrets.HOST }}
+          username: ${{ secrets.USERNAME }}
+          key: ${{ secrets.SSH_KEY }}
+          port: 22
+          script: |
+            # Переходим в папку (ЗАМЕНИ ПУТЬ НИЖЕ НА ТОТ, ЧТО ТЫ ПОЛУЧИЛ В ШАГЕ 1)
+            cd /home/your_user/sych-bot
+            
+            # Скачиваем обновления
+            git pull origin main
+            
+            # Обновляем библиотеки (вдруг ты добавил новые)
+            npm install --production
+            
+            # Перезапускаем бота
+            pm2 restart sych-bot

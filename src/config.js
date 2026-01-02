@@ -29,6 +29,15 @@ module.exports = {
   contextSize: 30,
   triggerRegex: /(?<![а-яёa-z])(сыч|sych)(?![а-яёa-z])/i,
 
+  // === OPENROUTER CONFIG ===
+  openRouterKey: process.env.OPENROUTER_API_KEY, 
+  
+  // Модель для ОТВЕТОВ (умная)
+  openRouterModel: 'google/gemini-3-flash-preview', // Или 'google/gemini-3-flash-preview' если она там уже есть
+  
+  // Модель для ЛОГИКИ (бесплатная/дешевая: реакции, анализ, проверки)
+  openRouterLogicModel: 'google/gemma-3-27b-it:free', 
+
 };
 
 
