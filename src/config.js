@@ -39,7 +39,7 @@ module.exports = {
   openRouterLogicModel: 'google/gemma-3-27b-it:free', 
 
   // Модель для ПОИСКА (RAG)
-  openRouterSearchModel: 'perplexity/llama-3-sonar-small-32k-online',
+  openRouterSearchModel: 'perplexity/sonar',
 
 };
 
