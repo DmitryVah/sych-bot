@@ -213,15 +213,17 @@ class AiService {
   }
 
   getCurrentTime() {
-    return new Date().toLocaleString("ru-RU", {
+    const time = new Date().toLocaleString("ru-RU", {
       timeZone: "Asia/Yekaterinburg",
-      weekday: 'long',
+      weekday: 'short', // Сократим до Пт, Пн (экономим токены)
       year: 'numeric',
-      month: 'long',
+      month: 'numeric',
       day: 'numeric',
       hour: '2-digit',
       minute: '2-digit'
     });
+    // Явно указываем базу для расчетов
+    return `${time} (Базовое время: Екатеринбург, UTC+5)`;
   }
 
 // === НОВЫЙ МЕТОД: ЧИСТЫЙ ПОИСК ===
