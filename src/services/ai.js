@@ -426,22 +426,26 @@ async generateFlavorText(task, result) {
 }
 
   // === ТРАНСКРИБАЦИЯ ===
-  async transcribeAudio(audioBuffer, userName = "Пользователь", mimeType = "audio/ogg") {
-    const requestLogic = async () => {
-        this.countRequest('gemini');
-        const parts = [
-            { inlineData: { mimeType: mimeType, data: audioBuffer.toString("base64") } },
-            { text: prompts.transcription(userName) }
-        ];
-        const result = await this.creativeModel.generateContent(parts);
-        let text = result.response.text();
-        text = text.replace(/```json/g, '').replace(/```/g, '').trim();
-        const firstBrace = text.indexOf('{');
-        const lastBrace = text.lastIndexOf('}');
-        if (firstBrace !== -1 && lastBrace !== -1) text = text.substring(firstBrace, lastBrace + 1);
-        return JSON.parse(text);
-    };
-    try { return await this.executeWithRetry(requestLogic, 'gemini'); } catch (e) { return null; }
+  async transcribeAudio(audioBuffer, userName, mimeType) {
+    // Только Native поддерживает загрузку файлов из буфера так легко и бесплатно
+    if (!this.keys || this.keys.length === 0) {
+        console.warn("[AI WARN] Получено голосовое, но нет ключей Google для расшифровки. Пропускаю.");
+        return null;
+    }
+
+    try {
+        return await this.executeNativeWithRetry(async () => {
+          const parts = [ { inlineData: { mimeType: mimeType, data: audioBuffer.toString("base64") } }, { text: prompts.transcription(userName) }];
+          const result = await this.nativeModel.generateContent(parts);
+          let text = result.response.text().replace(/```json/g, '').replace(/```/g, '').trim();
+          const first = text.indexOf('{'), last = text.lastIndexOf('}');
+          if (first !== -1 && last !== -1) text = text.substring(first, last + 1);
+          return JSON.parse(text);
+        });
+    } catch (e) { 
+        console.error(`[TRANSCRIPTION FAIL] ${e.message}`);
+        return null; 
+    }
   }
 
   // === ПАРСИНГ НАПОМИНАНИЯ (С КОНТЕКСТОМ) ===
